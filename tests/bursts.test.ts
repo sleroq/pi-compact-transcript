@@ -24,6 +24,32 @@ test("repeated calls of the same tool coalesce into one counted row", async () =
 	}
 });
 
+test("nested calls count toward the summary without interrupting a burst", async () => {
+	const h = harness();
+	await h.startSession();
+	await h.emit("agent_start");
+	try {
+		const a = await h.start("a", "codemode", { code: "first script" });
+		// Pi emits these events without creating a transcript row.
+		const nested = { parentToolCallId: "a", toolCallId: "a/1", toolName: "read", args: { path: "a.ts" } };
+		await h.emit("tool_execution_start", nested);
+		await h.emit("tool_execution_update", { ...nested, partialResult: { content: [] } });
+		await h.emit("tool_execution_end", { ...nested, result: failure, isError: true });
+		await h.finish("a");
+		const b = await h.start("b", "codemode", { code: "second script" });
+		await h.finish("b");
+		await h.emit("agent_end");
+
+		assert.deepEqual(lines(a), []);
+		assert.equal(row(b), "◆ 2× codemode second script {ok}");
+		const summary = h.entries.find((entry) => entry.type === "compact-transcript-summary");
+		assert.equal(summary?.data.reads, 1);
+		assert.equal(summary?.data.failed, 1);
+	} finally {
+		await h.emit("session_shutdown");
+	}
+});
+
 test("a burst row shows the combined duration of its calls", async (t) => {
 	let now = 1_000_000;
 	t.mock.method(Date, "now", () => now);
