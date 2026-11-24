@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { setImmediate } from "node:timers/promises";
 import test from "node:test";
 import { harness, lines, row, tagTheme } from "./helpers.ts";
 
@@ -61,6 +62,52 @@ test("history uses user and custom message boundaries, including on tree navigat
 		h.setBranch(branch.slice(0, 3));
 		await h.emit("session_tree");
 		assert.equal(row(h.restore("a", "read")), "◆ 1 tool call");
+	} finally { await h.emit("session_shutdown"); }
+});
+
+test("live and final activity requests include only reasoning text exposed alongside tool calls", async () => {
+	const h = harness();
+	const requests: string[] = [];
+	Object.assign(h.ctx, {
+		modelRegistry: {
+			find: () => ({ id: "test" }),
+			streamSimple(_model: { id: string }, context: { messages: { content: string }[] }) {
+				requests.push(context.messages[0].content);
+				return { result: async () => ({ stopReason: "stop", content: [{ type: "text", text: "Checked files" }] }) };
+			},
+		},
+	});
+	h.setBranch([{ ...config, data: { ...config.data, activitySummary: true } }]);
+	await h.startSession();
+	await h.emit("agent_start");
+	try {
+		await h.emit("message_end", { message: { role: "assistant", content: [
+			{ type: "thinking", thinking: "Inspect config first", thinkingSignature: "private signature" },
+			{ type: "thinking", thinking: "redacted thinking", redacted: true },
+			call("a"),
+		] } });
+		await h.start("a", "read");
+		await h.finish("a");
+		await h.emit("message_end", { message: { role: "assistant", content: [
+			{ type: "thinking", thinking: "Check defaults next" },
+			{ type: "text", text: "Not reasoning" },
+			...Array.from({ length: 4 }, (_, i) => call(`b${i}`)),
+		] } });
+		for (let i = 0; i < 4; i++) {
+			await h.start(`b${i}`, "read");
+			await h.finish(`b${i}`);
+		}
+		await h.emit("agent_settled");
+		await setImmediate();
+
+		assert.deepEqual(requests.map((payload) => {
+			const { phase, reasoning } = JSON.parse(payload);
+			return { phase, reasoning };
+		}), [
+			{ phase: "live", reasoning: ["Inspect config first", "Check defaults next"] },
+			{ phase: "finished", reasoning: ["Inspect config first", "Check defaults next"] },
+		]);
+		assert.doesNotMatch(requests.join("\n"), /private signature|redacted thinking|Not reasoning/);
 	} finally { await h.emit("session_shutdown"); }
 });
 

@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, MessageEndEvent, Theme } from "@earendil-works/pi-coding-agent";
 import {
 	AssistantMessageComponent,
 	CONFIG_DIR_NAME,
@@ -10,7 +10,7 @@ import { type Component, Markdown, Spacer, Text, truncateToWidth } from "@earend
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { activitySummarizer, createTurnActivity, normalizeActivityLine } from "./turn-activity.ts";
+import { activitySummarizer, createTurnActivity, normalizeActivityLine, toolReasoning } from "./turn-activity.ts";
 
 // Older versions of this extension wrote a footer status under this key; it is
 // kept only to clear that status once per session for users upgrading in place.
@@ -1309,8 +1309,19 @@ function registerCommand(pi: ExtensionAPI) {
 
 function trackFoldActivity(pi: ExtensionAPI) {
 	const activities = new Map<ToolFold, ReturnType<typeof createTurnActivity>>();
+	let pendingReasoning: string | undefined;
 
 	return {
+		noteReasoning(message: MessageEndEvent["message"], ctx: ExtensionContext) {
+			if (state.config.toolGrouping !== "turn" || !state.config.activitySummary || !isEnabled() || ctx.mode !== "tui") return;
+			const excerpt = toolReasoning(message);
+			if (!excerpt) return;
+
+			const fold = state.currentFold;
+			const activity = fold && activities.get(fold);
+			if (activity) activity.noteReasoning(excerpt);
+			else pendingReasoning = excerpt;
+		},
 		forCurrentFold(ctx: ExtensionContext) {
 			const fold = state.currentFold;
 			const model = state.config.activitySummary;
@@ -1325,10 +1336,15 @@ function trackFoldActivity(pi: ExtensionAPI) {
 				fold.anchor.invalidate?.();
 				if (final) pi.appendEntry(ACTIVITY_ENTRY_TYPE, { toolCallId: fold.firstToolId, status });
 			});
+			if (pendingReasoning) {
+				activity.noteReasoning(pendingReasoning);
+				pendingReasoning = undefined;
+			}
 			activities.set(fold, activity);
 			return activity;
 		},
 		finishCurrentFold() {
+			pendingReasoning = undefined;
 			const fold = state.currentFold;
 			if (!fold) return;
 			const activity = activities.get(fold);
@@ -1338,6 +1354,7 @@ function trackFoldActivity(pi: ExtensionAPI) {
 		cancelAll() {
 			for (const activity of activities.values()) activity.cancel();
 			activities.clear();
+			pendingReasoning = undefined;
 		},
 	};
 }
@@ -1392,6 +1409,10 @@ export default function compactTranscript(pi: ExtensionAPI) {
 
 	pi.on("message_start", (event) => {
 		if (event.message.role === "user" || event.message.role === "custom") activity.finishCurrentFold();
+	});
+
+	pi.on("message_end", (event, ctx) => {
+		activity.noteReasoning(event.message, ctx);
 	});
 
 	pi.on("agent_settled", () => {
