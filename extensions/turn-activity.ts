@@ -2,7 +2,6 @@ import type { ExtensionContext, MessageEndEvent } from "@earendil-works/pi-codin
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { basename } from "node:path";
 
-export const DEFAULT_ACTIVITY_MODEL = "fumo/codex/gpt-6-luna";
 const UPDATE_CALLS = 5;
 const UPDATE_INTERVAL_MS = 15_000;
 const REQUEST_TIMEOUT_MS = 12_000;
@@ -137,8 +136,7 @@ export function createTurnActivity(summarize: Summarize, publish: Publish) {
 	};
 }
 
-export function activitySummarizer(registry: ExtensionContext["modelRegistry"], configuredModel: true | string): Summarize | undefined {
-	const modelRef = configuredModel === true ? DEFAULT_ACTIVITY_MODEL : configuredModel;
+export function activitySummarizer(registry: ExtensionContext["modelRegistry"], modelRef: string): Summarize | undefined {
 	const slash = modelRef.indexOf("/");
 	const model = registry?.find(modelRef.slice(0, slash), modelRef.slice(slash + 1));
 	if (!model || typeof registry.streamSimple !== "function") return undefined;

@@ -29,7 +29,7 @@ type CompactTranscriptConfig = {
 	summaryStyle: SummaryStyle;
 	highlightToolActions: boolean;
 	toolGrouping: "burst" | "turn";
-	activitySummary: false | true | string;
+	activitySummary: false | string;
 };
 
 type ToolFold = {
@@ -154,7 +154,7 @@ function normalizeConfig(input: unknown, fallback = DEFAULT_CONFIG): CompactTran
 		: fallback.highlightToolActions;
 	const toolGrouping = source.toolGrouping === "burst" || source.toolGrouping === "turn"
 		? source.toolGrouping : fallback.toolGrouping;
-	const activitySummary = typeof source.activitySummary === "boolean" ||
+	const activitySummary = source.activitySummary === false ||
 		(typeof source.activitySummary === "string" && /^[^/\s]+\/[^\s/]+(?:\/[^\s/]+)*$/.test(source.activitySummary))
 		? source.activitySummary : fallback.activitySummary;
 	return { enabled, summaryStyle, highlightToolActions, toolGrouping, activitySummary };
