@@ -757,6 +757,11 @@ function trackToolNeighbors() {
 	return proto[CONTAINER_PATCH_KEY] = slots;
 }
 
+function isHiddenToolRow(row: Component): boolean {
+	return ("hideComponent" in row && row.hideComponent === true)
+		|| ("__compactTranscriptHidden" in row && row.__compactTranscriptHidden === true);
+}
+
 function precedingRowNeedsGap(slots: ToolSlots, tool: Component, width: number): boolean {
 	const slot = slots.get(tool);
 	if (!slot) return false;
@@ -766,9 +771,7 @@ function precedingRowNeedsGap(slots: ToolSlots, tool: Component, width: number):
 	for (let i = slot.index - 1; i >= 0; i--) {
 		const previous = children[i];
 		if (previous instanceof ToolExecutionComponent) {
-			// SAFETY: These optional properties are assigned by Pi and the compact renderer.
-			const row = previous as Component & { hideComponent?: boolean; __compactTranscriptHidden?: boolean };
-			if (row.hideComponent || row.__compactTranscriptHidden) continue;
+			if (isHiddenToolRow(previous)) continue;
 			return false; // Pack adjacent tool rows together.
 		}
 		// The user's colored bottom padding is part of the message, not a gap.
