@@ -46,6 +46,22 @@ test("commentary before tool calls gets the rail; final answers do not", async (
 	assert.ok(answer.every((line) => !line.startsWith("│")), "final answers stay unframed");
 });
 
+test("a turn fold owns the only blank line after commentary", async () => {
+	const h = harness();
+	h.setBranch([{ type: "custom", customType: "compact-transcript-config", data: { toolGrouping: "turn" } }]);
+	await h.startSession();
+	await h.emit("agent_start");
+	try {
+		const commentary = new AssistantMessageComponent(message({ type: "text", text: "Checking files." }, toolCall), true);
+		const tool = await h.start(toolCall.id, toolCall.name, toolCall.arguments);
+		await h.finish(toolCall.id);
+		const transcript = [...render(commentary), ...lines(tool)];
+		assert.deepEqual(transcript.slice(-3), ["│  Checking files.", "", "◆ 1 tool call"]);
+	} finally {
+		await h.emit("session_shutdown");
+	}
+});
+
 test("commentary is railed when thinking is shown too", async () => {
 	const h = harness();
 	await h.startSession();

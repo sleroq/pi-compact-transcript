@@ -21,6 +21,7 @@ const ACTIVITY_ENTRY_TYPE = "compact-transcript-activity";
 
 const BLINK_INTERVAL_MS = 400;
 const COMMENTARY_RAIL_WIDTH = 2;
+const FOLD_TOP_SPACING = 1;
 
 type SummaryStyle = "plain" | "quote" | "off";
 
@@ -911,6 +912,7 @@ function patchToolExecutionComponent() {
 			return;
 		}
 
+		if (state.config.toolGrouping === "turn") this.selfRenderContainer.addChild(new Spacer(FOLD_TOP_SPACING));
 		this.selfRenderContainer.addChild(cachedLine(line, theme.fg("dim", "…")));
 		const thoughtLine = state.config.toolGrouping === "turn" ? "" : currentThoughtLine(this.toolCallId, theme);
 		if (thoughtLine) {
@@ -925,14 +927,13 @@ function patchToolExecutionComponent() {
 	};
 
 	// pi 1.3+ routes mouse events to components; older versions have no handleMouse.
-	// The compact row is drawn at y = 0 without pi's native layout, so native
-	// routing would miss it. Map a left click on it to pi's per-tool toggle.
+	// Compact rows bypass pi's native layout, so route clicks on the label ourselves.
 	if (typeof originalHandleMouse === "function") {
 		proto.handleMouse = function patchedHandleMouse(event: any) {
 			if (this.hideComponent || this.__compactTranscriptHidden) return undefined;
 			if (!this.__compactTranscriptForceSelf) return originalHandleMouse.call(this, event);
-			// Only the tool row toggles; the thought ticker below it does not.
-			if (event?.y !== 0 || event.type !== "click" || event.button !== "left" || !this.result) return undefined;
+			const labelY = state.config.toolGrouping === "turn" ? FOLD_TOP_SPACING : 0;
+			if (event?.y !== labelY || event.type !== "click" || event.button !== "left" || !this.result) return undefined;
 			this.setExpanded(!this.expanded);
 			return { handled: true };
 		};
@@ -1008,7 +1009,8 @@ function frameCommentary(component: any, message: any): void {
 			framed = true;
 		}
 	}
-	if (framed) component.contentContainer.addChild(new Spacer(1));
+	// In turn mode the visible tool row owns the gap; earlier rows can disappear completely.
+	if (framed && state.config.toolGrouping !== "turn") component.contentContainer.addChild(new Spacer(1));
 }
 
 function patchAssistantMessageComponent() {

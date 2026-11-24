@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { setImmediate } from "node:timers/promises";
 import test from "node:test";
-import { harness, lines, row, tagTheme } from "./helpers.ts";
+import { harness, lines, tagTheme } from "./helpers.ts";
 
 const config = { type: "custom", customType: "compact-transcript-config", data: { toolGrouping: "turn" } };
 function message(id: string, role: string, content: unknown = []) {
@@ -27,20 +27,20 @@ test("live turns group different tools and failures across commentary and retrie
 		const b = h.component("b", "bash", {});
 		await h.emit("tool_execution_start", { toolCallId: "b", toolName: "bash", args: {} });
 		assert.deepEqual(lines(a), []);
-		assert.match(row(b), /<error>[◆◇] <\/error><dim>2 tool calls · 1 failed<\/dim>/);
+		assert.match(lines(b)[1], /<error>[◆◇] <\/error><dim>2 tool calls · 1 failed<\/dim>/);
 		await h.finish("b");
 		assert.equal(h.renderSummary({ reads: 1 }), undefined);
 		for (const c of [a, b]) c.setExpanded(true);
 		assert.ok(lines(a).length > 0 && lines(b).length > 0);
 		for (const c of [a, b]) c.setExpanded(false);
 		assert.deepEqual(lines(a), []);
-		assert.match(row(b), /2 tool calls/);
+		assert.deepEqual(lines(b), ["", "<error>◆ </error><dim>2 tool calls · 1 failed</dim>"]);
 		await h.emit("agent_settled");
 		await h.emit("agent_start");
 		const c = await h.start("c", "grep");
 		await h.finish("c");
-		assert.match(row(c), /1 tool call/);
-		assert.match(row(b), /2 tool calls/);
+		assert.match(lines(c)[1], /1 tool call/);
+		assert.match(lines(b)[1], /2 tool calls/);
 	} finally { await h.emit("session_shutdown"); }
 });
 
@@ -57,11 +57,11 @@ test("history uses user and custom message boundaries, including on tree navigat
 		const b = h.restore("b", "bash");
 		const c = h.restore("c", "read");
 		assert.deepEqual(lines(a), []);
-		assert.equal(row(b), "◆ 2 tool calls · Checked files · 1 failed");
-		assert.equal(row(c), "◆ 1 tool call");
+		assert.deepEqual(lines(b), ["", "◆ 2 tool calls · Checked files · 1 failed"]);
+		assert.deepEqual(lines(c), ["", "◆ 1 tool call"]);
 		h.setBranch(branch.slice(0, 3));
 		await h.emit("session_tree");
-		assert.equal(row(h.restore("a", "read")), "◆ 1 tool call");
+		assert.deepEqual(lines(h.restore("a", "read")), ["", "◆ 1 tool call"]);
 	} finally { await h.emit("session_shutdown"); }
 });
 
