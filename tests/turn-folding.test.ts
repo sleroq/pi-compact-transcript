@@ -70,14 +70,17 @@ test("live and final activity requests include only reasoning text exposed along
 	const requests: string[] = [];
 	Object.assign(h.ctx, {
 		modelRegistry: {
-			find: () => ({ id: "test" }),
+			find(provider: string, id: string) {
+				assert.deepEqual([provider, id], ["test-provider", "family/small"]);
+				return { id };
+			},
 			streamSimple(_model: { id: string }, context: { messages: { content: string }[] }) {
 				requests.push(context.messages[0].content);
 				return { result: async () => ({ stopReason: "stop", content: [{ type: "text", text: "Checked files" }] }) };
 			},
 		},
 	});
-	h.setBranch([{ ...config, data: { ...config.data, activitySummary: true } }]);
+	h.setBranch([{ ...config, data: { ...config.data, activitySummary: "test-provider/family/small" } }]);
 	await h.startSession();
 	await h.emit("agent_start");
 	try {
@@ -110,4 +113,3 @@ test("live and final activity requests include only reasoning text exposed along
 		assert.doesNotMatch(requests.join("\n"), /private signature|redacted thinking|Not reasoning/);
 	} finally { await h.emit("session_shutdown"); }
 });
-
