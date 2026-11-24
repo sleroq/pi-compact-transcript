@@ -5,8 +5,9 @@ import {
 	getAgentDir,
 	getMarkdownTheme,
 	ToolExecutionComponent,
+	UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, Markdown, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { type Component, Container, Markdown, Spacer, stripTerminalSequences, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -97,6 +98,7 @@ const DEFAULT_CONFIG: CompactTranscriptConfig = {
 
 const STATE_KEY = Symbol.for("pi-compact-transcript.state");
 const TOOL_PATCH_KEY = Symbol.for("pi-compact-transcript.tool-patch");
+const CONTAINER_PATCH_KEY = Symbol.for("pi-compact-transcript.container-patch");
 const ASSISTANT_PATCH_KEY = Symbol.for("pi-compact-transcript.assistant-patch");
 
 // Persisted dismissal flag so users who decline are never asked again.
@@ -739,6 +741,44 @@ function cachedLine(text: string, ellipsis: string): Component {
 	};
 }
 
+type ToolSlots = WeakMap<Component, { parent: Container; index: number }>;
+
+function trackToolNeighbors() {
+	// SAFETY: The extension owns this symbol and reuses its slots across /reload.
+	const proto = Container.prototype as Container & { [CONTAINER_PATCH_KEY]?: ToolSlots };
+	if (proto[CONTAINER_PATCH_KEY]) return proto[CONTAINER_PATCH_KEY];
+
+	const slots: ToolSlots = new WeakMap();
+	const original = proto.addChild;
+	proto.addChild = function (child) {
+		if (child instanceof ToolExecutionComponent) slots.set(child, { parent: this, index: this.children.length });
+		original.call(this, child);
+	};
+	return proto[CONTAINER_PATCH_KEY] = slots;
+}
+
+function precedingRowNeedsGap(slots: ToolSlots, tool: Component, width: number): boolean {
+	const slot = slots.get(tool);
+	if (!slot) return false;
+	const { children } = slot.parent;
+	if (children[slot.index] !== tool) slot.index = children.indexOf(tool);
+
+	for (let i = slot.index - 1; i >= 0; i--) {
+		const previous = children[i];
+		if (previous instanceof ToolExecutionComponent) {
+			// SAFETY: These optional properties are assigned by Pi and the compact renderer.
+			const row = previous as Component & { hideComponent?: boolean; __compactTranscriptHidden?: boolean };
+			if (row.hideComponent || row.__compactTranscriptHidden) continue;
+			return false; // Pack adjacent tool rows together.
+		}
+		// The user's colored bottom padding is part of the message, not a gap.
+		if (previous instanceof UserMessageComponent) return true;
+		const tail = previous.render(width).at(-1);
+		if (tail !== undefined) return stripTerminalSequences(tail).trim().length > 0;
+	}
+	return false;
+}
+
 function patchToolExecutionComponent() {
 	const proto = ToolExecutionComponent.prototype as any;
 	if (typeof proto.updateDisplay !== "function" || typeof proto.render !== "function") return;
@@ -752,6 +792,9 @@ function patchToolExecutionComponent() {
 	const originalUpdateDisplay = existing?.originalUpdateDisplay ?? proto.updateDisplay;
 	const originalRender = existing?.originalRender ?? proto.render;
 	const originalHandleMouse = existing?.originalHandleMouse ?? proto.handleMouse;
+	const slots = trackToolNeighbors();
+	const spacedTools = new WeakSet<Component>();
+	const spacedLines = new WeakMap<readonly string[], readonly string[]>();
 
 	proto.updateDisplay = function patchedUpdateDisplay() {
 		if (!this.toolCallId || !this.toolName || !this.selfRenderContainer || typeof this.selfRenderContainer.clear !== "function") {
@@ -821,19 +864,30 @@ function patchToolExecutionComponent() {
 
 	proto.render = function patchedRender(width: number) {
 		if (this.hideComponent || this.__compactTranscriptHidden) return [];
-		if (this.__compactTranscriptForceSelf) return this.selfRenderContainer.render(width);
-		return originalRender.call(this, width);
+		if (!this.__compactTranscriptForceSelf) return originalRender.call(this, width);
+
+		const lines: readonly string[] = this.selfRenderContainer.render(width);
+		if (!precedingRowNeedsGap(slots, this, width)) {
+			spacedTools.delete(this);
+			return lines;
+		}
+		spacedTools.add(this);
+		let padded = spacedLines.get(lines);
+		if (!padded) {
+			padded = ["", ...lines];
+			spacedLines.set(lines, padded);
+		}
+		return padded;
 	};
 
 	// pi 1.3+ routes mouse events to components; older versions have no handleMouse.
-	// The compact row is drawn at y = 0 without pi's native layout, so native
-	// routing would miss it. Map a left click on it to pi's per-tool toggle.
+	// Map clicks on the compact label to pi's per-tool toggle.
 	if (typeof originalHandleMouse === "function") {
 		proto.handleMouse = function patchedHandleMouse(event: any) {
 			if (this.hideComponent || this.__compactTranscriptHidden) return undefined;
 			if (!this.__compactTranscriptForceSelf) return originalHandleMouse.call(this, event);
-			// Only the tool row toggles; the thought ticker below it does not.
-			if (event?.y !== 0 || event.type !== "click" || event.button !== "left" || !this.result) return undefined;
+			const labelY = spacedTools.has(this) ? 1 : 0;
+			if (event?.y !== labelY || event.type !== "click" || event.button !== "left" || !this.result) return undefined;
 			this.setExpanded(!this.expanded);
 			return { handled: true };
 		};

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { AssistantMessageComponent, initTheme, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences, Text, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
+import { AssistantMessageComponent, initTheme, ToolExecutionComponent, UserMessageComponent } from "@earendil-works/pi-coding-agent";
+import { Container, stripTerminalSequences, Text, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import compactTranscript from "../extensions/compact-transcript.ts";
 
 test("compact tool and thought rows use render width and recover on resize", async () => {
@@ -283,6 +283,27 @@ test("hidden burst rows ignore clicks and the burst row expands", async () => {
 		assert.equal(expanded(second), true);
 	} finally {
 		await emit("session_shutdown");
+	}
+});
+
+test("a compact tool block leaves one gap after a prompt and keeps its rows packed", () => {
+	const { emit, tool, finish, click } = mouseHarness();
+	emit("agent_start");
+	try {
+		const chat = new Container();
+		const prompt = new UserMessageComponent("Inspect the files.");
+		const hidden = tool("spacing-a", "read", { path: "a.ts" });
+		const burst = tool("spacing-b", "read", { path: "b.ts" });
+		const next = tool("spacing-c", "bash", { command: "ls" });
+		for (const component of [prompt, new Container(), hidden, burst, next]) chat.addChild(component);
+		for (const component of [hidden, burst, next]) finish(component);
+
+		const rendered = chat.render(80).slice(prompt.render(80).length).map((line) => stripTerminalSequences(line));
+		assert.deepEqual(rendered, ["", "◆ 2× read b.ts {done}", "◆ $ ls {done}"]);
+		assert.equal(click(burst, 0, { height: 2 }), undefined);
+		assert.deepEqual(click(burst, 1, { height: 2 }), { handled: true });
+	} finally {
+		emit("session_shutdown");
 	}
 });
 
