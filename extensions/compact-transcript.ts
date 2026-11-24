@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, MessageEndEvent, Theme } from "@earendil-works/pi-coding-agent";
 import {
 	AssistantMessageComponent,
 	CONFIG_DIR_NAME,
@@ -11,12 +11,14 @@ import { type Component, Container, Markdown, Spacer, stripTerminalSequences, Te
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { activitySummarizer, createTurnActivity, normalizeActivityLine, toolReasoning } from "./turn-activity.ts";
 
 // Older versions of this extension wrote a footer status under this key; it is
 // kept only to clear that status once per session for users upgrading in place.
 const STATUS_KEY = "compact-transcript";
 const CONFIG_ENTRY_TYPE = "compact-transcript-config";
 const SUMMARY_ENTRY_TYPE = "compact-transcript-summary";
+const ACTIVITY_ENTRY_TYPE = "compact-transcript-activity";
 
 const BLINK_INTERVAL_MS = 400;
 const COMMENTARY_RAIL_WIDTH = 2;
@@ -27,6 +29,15 @@ type CompactTranscriptConfig = {
 	enabled: boolean;
 	summaryStyle: SummaryStyle;
 	highlightToolActions: boolean;
+	toolGrouping: "burst" | "turn";
+	activitySummary: false | string;
+};
+
+type ToolFold = {
+	firstToolId: string;
+	status?: string;
+	anchor: ToolInfo;
+	members: ToolInfo[];
 };
 
 type ToolInfo = {
@@ -45,6 +56,7 @@ type ToolInfo = {
 	result?: string;
 	isError?: boolean;
 	invalidate?: () => void;
+	fold?: ToolFold;
 };
 
 type RunStats = {
@@ -75,6 +87,11 @@ type RuntimeState = {
 	config: CompactTranscriptConfig;
 	toolsById: Map<string, ToolInfo>;
 	currentBurst: ToolInfo[];
+	currentFold?: ToolFold;
+	historyTurns: Map<string, string>;
+	historyFolds: Map<string, ToolFold>;
+	historyOrder: Map<string, number>;
+	historyStatuses: Map<string, string>;
 	hiddenToolIds: Set<string>;
 	runningToolIds: Set<string>;
 	agentActive: boolean;
@@ -94,6 +111,8 @@ const DEFAULT_CONFIG: CompactTranscriptConfig = {
 	enabled: true,
 	summaryStyle: "plain",
 	highlightToolActions: false,
+	toolGrouping: "burst",
+	activitySummary: false,
 };
 
 const STATE_KEY = Symbol.for("pi-compact-transcript.state");
@@ -135,7 +154,12 @@ function normalizeConfig(input: unknown, fallback = DEFAULT_CONFIG): CompactTran
 	const highlightToolActions = typeof source.highlightToolActions === "boolean"
 		? source.highlightToolActions
 		: fallback.highlightToolActions;
-	return { enabled, summaryStyle, highlightToolActions };
+	const toolGrouping = source.toolGrouping === "burst" || source.toolGrouping === "turn"
+		? source.toolGrouping : fallback.toolGrouping;
+	const activitySummary = source.activitySummary === false ||
+		(typeof source.activitySummary === "string" && /^[^/\s]+\/[^\s/]+(?:\/[^\s/]+)*$/.test(source.activitySummary))
+		? source.activitySummary : fallback.activitySummary;
+	return { enabled, summaryStyle, highlightToolActions, toolGrouping, activitySummary };
 }
 
 function readConfigFile(path: string, fallback: CompactTranscriptConfig): CompactTranscriptConfig | undefined {
@@ -173,6 +197,10 @@ function getState(): RuntimeState {
 		config: { ...DEFAULT_CONFIG },
 		toolsById: new Map(),
 		currentBurst: [],
+		historyTurns: new Map(),
+		historyFolds: new Map(),
+		historyOrder: new Map(),
+		historyStatuses: new Map(),
 		hiddenToolIds: new Set(),
 		runningToolIds: new Set(),
 		agentActive: false,
@@ -375,6 +403,11 @@ function resultPreview(result: any, isPartial = false): string {
 function resetToolRun() {
 	state.toolsById = new Map();
 	state.currentBurst = [];
+	state.currentFold = undefined;
+	state.historyTurns = new Map();
+	state.historyFolds = new Map();
+	state.historyOrder = new Map();
+	state.historyStatuses = new Map();
 	state.hiddenToolIds = new Set();
 	state.runningToolIds = new Set();
 	state.currentThoughtHeading = undefined;
@@ -415,6 +448,7 @@ function applyResult(info: ToolInfo, result: any, isError: boolean, isPartial: b
 	else if (!isPartial) info.result = undefined;
 	if (isError) {
 		info.isError = true;
+		if (state.config.toolGrouping === "turn") return;
 		// A failed tool always gets its own visible row, even if a burst had
 		// hidden it; render it as itself rather than as a burst summary.
 		// Rebuilt history only learns about the failure here, so split the
@@ -433,7 +467,10 @@ function ensureBlinkTimer() {
 			return;
 		}
 		state.blinkOn = !state.blinkOn;
-		for (const id of state.runningToolIds) state.toolsById.get(id)?.invalidate?.();
+		for (const id of state.runningToolIds) {
+			const info = state.toolsById.get(id);
+			(info?.fold?.anchor ?? info)?.invalidate?.();
+		}
 	}, BLINK_INTERVAL_MS);
 	state.blinkTimer.unref?.();
 }
@@ -604,6 +641,50 @@ function joinBurst(info: ToolInfo) {
 	previous?.invalidate?.();
 }
 
+// Branch IDs are stable across history reconstruction; extension custom entries are
+// not message boundaries. Unknown rows deliberately receive singleton folds.
+function indexHistory(ctx: ExtensionContext) {
+	let turn = "";
+	let order = 0;
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type === "custom" && entry.customType === ACTIVITY_ENTRY_TYPE) {
+			const data = entry.data;
+			if (data && typeof data === "object" && "toolCallId" in data && "status" in data
+				&& typeof data.toolCallId === "string" && typeof data.status === "string") {
+				state.historyStatuses.set(data.toolCallId, normalizeActivityLine(data.status));
+			}
+		}
+		if (entry.type === "custom_message") turn = entry.id;
+		if (entry.type !== "message") continue;
+		const message = entry.message;
+		if (message.role === "user" || message.role === "custom") turn = entry.id;
+		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+		for (const block of message.content) {
+			if (block.type !== "toolCall" || typeof block.id !== "string") continue;
+			state.historyTurns.set(block.id, turn || entry.id);
+			state.historyOrder.set(block.id, order++);
+		}
+	}
+}
+
+function joinFold(info: ToolInfo, history = false) {
+	if (info.fold) return;
+	const key = history ? state.historyTurns.get(info.id) : undefined;
+	let fold = history ? (key ? state.historyFolds.get(key) : undefined) : state.currentFold;
+	if (!fold) {
+		fold = { firstToolId: info.id, anchor: info, members: [] };
+		if (history && key) state.historyFolds.set(key, fold);
+		else if (!history) state.currentFold = fold;
+	}
+	const previous = fold.anchor;
+	fold.members.push(info);
+	info.fold = fold;
+	if (!history || (state.historyOrder.get(info.id) ?? 0) > (state.historyOrder.get(fold.anchor.id) ?? 0)) fold.anchor = info;
+	if (history && (state.historyOrder.get(info.id) ?? 0) < (state.historyOrder.get(fold.firstToolId) ?? 0)) fold.firstToolId = info.id;
+	if (history) fold.status ??= state.historyStatuses.get(info.id);
+	previous.invalidate?.();
+}
+
 function beginTool(id: string, name: string, args: any) {
 	const info = upsertToolInfo(id, name, args);
 	setToolHidden(info, false);
@@ -613,7 +694,8 @@ function beginTool(id: string, name: string, args: any) {
 	info.startedAt = Date.now();
 	state.runningToolIds.add(id);
 	ensureBlinkTimer();
-	joinBurst(info);
+	if (state.config.toolGrouping === "turn") joinFold(info);
+	else joinBurst(info);
 	anchorCurrentThoughtTo(info);
 	// The component may already be on screen from argument streaming; repaint
 	// now so the running marker, burst count, and thought ticker appear
@@ -629,6 +711,11 @@ function hydrateTool(id: string, name: string, args: any, isError: boolean): Too
 	const info = upsertToolInfo(id, name, args);
 	setToolHidden(info, false);
 	info.burstCount = 1;
+	if (state.config.toolGrouping === "turn") {
+		info.isError = isError;
+		joinFold(info, !state.agentActive || state.historyTurns.has(id));
+		return info;
+	}
 	if (isError) {
 		info.isError = true;
 		state.currentBurst = [];
@@ -657,7 +744,7 @@ function updateToolResult(toolCallId: string, result: any, isError = false, isPa
 	// A failure ends the current burst so the red row stays visible and the
 	// next tool starts a fresh count.
 	if (isError) state.currentBurst = [];
-	info.invalidate?.();
+	(info.fold?.anchor ?? info).invalidate?.();
 }
 
 function compactToolLine(
@@ -673,6 +760,18 @@ function compactToolLine(
 	if (!state.toolsById.has(toolCallId)) hydrateTool(toolCallId, name, args, isError);
 	const info = upsertToolInfo(toolCallId, name, args, invalidate);
 	applyResult(info, result, isError, isPartial);
+	if (state.config.toolGrouping === "turn" && info.fold) {
+		const fold = info.fold;
+		if (fold.anchor !== info) return "";
+		const failed = fold.members.filter((member) => member.isError).length;
+		const running = fold.members.some((member) => member.running);
+		const count = fold.members.length;
+		const details = [`${count} tool call${count === 1 ? "" : "s"}`, fold.status, failed ? `${failed} failed` : ""].filter(Boolean).join(" · ");
+		const marker = failed && running
+			? theme.fg("error", state.blinkOn ? "◆ " : "◇ ")
+			: statusMarker(theme, { running, isError: failed > 0, hasResult: !running });
+		return marker + theme.fg("dim", details);
+	}
 	if (info.hidden) return "";
 
 	const isBurst = (info.burstCount ?? 1) > 1;
@@ -816,7 +915,9 @@ function patchToolExecutionComponent() {
 			hydrateTool(this.toolCallId, this.toolName, this.args, this.result?.isError ?? false);
 		}
 		const info = upsertToolInfo(this.toolCallId, this.toolName, this.args, invalidate);
+		const wasError = info.isError;
 		applyResult(info, this.result, this.result?.isError ?? false, this.isPartial);
+		if (info.isError !== wasError && info.fold?.anchor !== info) info.fold?.anchor.invalidate?.();
 
 		if (!isEnabled() || this.expanded) {
 			this.__compactTranscriptForceSelf = false;
@@ -857,7 +958,7 @@ function patchToolExecutionComponent() {
 		}
 
 		this.selfRenderContainer.addChild(cachedLine(line, theme.fg("dim", "…")));
-		const thoughtLine = currentThoughtLine(this.toolCallId, theme);
+		const thoughtLine = state.config.toolGrouping === "turn" ? "" : currentThoughtLine(this.toolCallId, theme);
 		if (thoughtLine) {
 			this.selfRenderContainer.addChild(cachedLine(thoughtLine, theme.fg("dim", "…")));
 		}
@@ -930,10 +1031,10 @@ class CommentaryRail implements Component {
 	// line array are unchanged.
 	private cachedWidth = -1;
 	private cachedRail = "";
-	private cachedSource?: string[];
+	private cachedSource?: readonly string[];
 	private cachedLines: string[] = [];
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		if (width <= COMMENTARY_RAIL_WIDTH) return this.content.render(width);
 		const rail = state.currentTheme?.fg("accent", "│ ") ?? "│ ";
 		const source = this.content.render(width - COMMENTARY_RAIL_WIDTH);
@@ -1263,13 +1364,66 @@ function registerCommand(pi: ExtensionAPI) {
 	});
 }
 
+function trackFoldActivity(pi: ExtensionAPI) {
+	const activities = new Map<ToolFold, ReturnType<typeof createTurnActivity>>();
+	let pendingReasoning: string | undefined;
+
+	return {
+		noteReasoning(message: MessageEndEvent["message"], ctx: ExtensionContext) {
+			if (state.config.toolGrouping !== "turn" || !state.config.activitySummary || !isEnabled() || ctx.mode !== "tui") return;
+			const excerpt = toolReasoning(message);
+			if (!excerpt) return;
+
+			const fold = state.currentFold;
+			const activity = fold && activities.get(fold);
+			if (activity) activity.noteReasoning(excerpt);
+			else pendingReasoning = excerpt;
+		},
+		forCurrentFold(ctx: ExtensionContext) {
+			const fold = state.currentFold;
+			const model = state.config.activitySummary;
+			if (!fold || !model || !isEnabled() || ctx.mode !== "tui") return;
+			const existing = activities.get(fold);
+			if (existing) return existing;
+			const summarize = activitySummarizer(ctx.modelRegistry, model);
+			if (!summarize) return;
+
+			const activity = createTurnActivity(summarize, (status, final) => {
+				fold.status = status;
+				fold.anchor.invalidate?.();
+				if (final) pi.appendEntry(ACTIVITY_ENTRY_TYPE, { toolCallId: fold.firstToolId, status });
+			});
+			if (pendingReasoning) {
+				activity.noteReasoning(pendingReasoning);
+				pendingReasoning = undefined;
+			}
+			activities.set(fold, activity);
+			return activity;
+		},
+		finishCurrentFold() {
+			pendingReasoning = undefined;
+			const fold = state.currentFold;
+			if (!fold) return;
+			const activity = activities.get(fold);
+			void activity?.finish().then(() => activities.delete(fold));
+			state.currentFold = undefined;
+		},
+		cancelAll() {
+			for (const activity of activities.values()) activity.cancel();
+			activities.clear();
+			pendingReasoning = undefined;
+		},
+	};
+}
+
 export default function compactTranscript(pi: ExtensionAPI) {
+	const activity = trackFoldActivity(pi);
 	patchRenderers();
 	registerCommand(pi);
 
 	pi.registerEntryRenderer<SummaryData>(SUMMARY_ENTRY_TYPE, (entry, _options, theme) => {
 		// Summaries are still recorded while hidden, so they reappear if switched back on.
-		if (state.config.summaryStyle === "off") return undefined;
+		if (state.config.toolGrouping === "turn" || state.config.summaryStyle === "off") return undefined;
 		const line = summaryLine(normalizeSummary(entry.data));
 		if (!line) return undefined;
 		if (state.config.summaryStyle === "quote") {
@@ -1279,12 +1433,15 @@ export default function compactTranscript(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (event, ctx) => {
+		activity.cancelAll();
+		state.agentActive = false;
 		restoreConfigFromBranch(ctx);
 		captureTheme(ctx);
 		// Drop all per-tool state and component registries from the previous
 		// session; stale burst counts otherwise corrupt the rebuilt transcript
 		// after resume or /reload.
 		resetToolRun();
+		if (state.config.toolGrouping === "turn") indexHistory(ctx);
 		state.runStats = newRunStats();
 		state.toolComponents = new Set();
 		state.assistantComponents = new Set();
@@ -1297,7 +1454,30 @@ export default function compactTranscript(pi: ExtensionAPI) {
 		}
 	});
 
+	pi.on("session_tree", (_event, ctx) => {
+		activity.cancelAll();
+		restoreConfigFromBranch(ctx);
+		captureTheme(ctx);
+		resetToolRun();
+		if (state.config.toolGrouping === "turn") indexHistory(ctx);
+		state.toolComponents = new Set();
+		state.assistantComponents = new Set();
+	});
+
+	pi.on("message_start", (event) => {
+		if (event.message.role === "user" || event.message.role === "custom") activity.finishCurrentFold();
+	});
+
+	pi.on("message_end", (event, ctx) => {
+		activity.noteReasoning(event.message, ctx);
+	});
+
+	pi.on("agent_settled", () => {
+		activity.finishCurrentFold();
+	});
+
 	pi.on("session_shutdown", async (_event, ctx) => {
+		activity.cancelAll();
 		stopBlinkTimer();
 		ctx.ui.setStatus(STATUS_KEY, undefined);
 		ctx.ui.setWorkingMessage();
@@ -1306,7 +1486,7 @@ export default function compactTranscript(pi: ExtensionAPI) {
 	pi.on("agent_start", (_event, ctx) => {
 		state.agentActive = true;
 		captureTheme(ctx);
-		resetToolRun();
+		if (state.config.toolGrouping === "burst") resetToolRun();
 		state.runStats = newRunStats();
 	});
 
@@ -1314,6 +1494,13 @@ export default function compactTranscript(pi: ExtensionAPI) {
 		state.agentActive = false;
 		state.currentBurst = [];
 		clearCurrentThought();
+		if (state.config.toolGrouping === "turn") {
+			for (const id of state.runningToolIds) {
+				const info = state.toolsById.get(id);
+				if (info) info.running = false;
+				info?.fold?.anchor.invalidate?.();
+			}
+		}
 		state.runningToolIds.clear();
 		stopBlinkTimer();
 		appendRunSummary(pi);
@@ -1330,7 +1517,7 @@ export default function compactTranscript(pi: ExtensionAPI) {
 			updateCurrentThoughtFromMessage(event.message);
 		}
 		if (textSignalHasVisibleContent(event.assistantMessageEvent)) {
-			const messageHasToolCall = Array.isArray(event.message?.content) && event.message.content.some((content: any) => content.type === "toolCall");
+			const messageHasToolCall = event.message.role === "assistant" && event.message.content.some((content) => content.type === "toolCall");
 			if (!messageHasToolCall && state.runningToolIds.size === 0) clearCurrentThought();
 			// Visible assistant text ends the current tool burst. Do not split on
 			// text_start alone: some providers create empty text blocks before a
@@ -1341,10 +1528,12 @@ export default function compactTranscript(pi: ExtensionAPI) {
 
 	pi.on("tool_execution_start", (event, ctx) => {
 		recordToolStart(event.toolName, event.args);
-		// Pi doesn't create rows for nested calls. They still count toward the run summary.
-		if (event.parentToolCallId) return;
-		captureTheme(ctx);
-		beginTool(event.toolCallId, event.toolName, event.args);
+		// Nested calls contribute to activity, but Pi doesn't give them a transcript row.
+		if (!event.parentToolCallId) {
+			captureTheme(ctx);
+			beginTool(event.toolCallId, event.toolName, event.args);
+		}
+		activity.forCurrentFold(ctx)?.start(event);
 	});
 
 	pi.on("tool_execution_update", (event, ctx) => {
@@ -1354,6 +1543,7 @@ export default function compactTranscript(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_execution_end", (event, ctx) => {
+		activity.forCurrentFold(ctx)?.complete(event);
 		if (event.parentToolCallId) {
 			if (event.isError) state.runStats.failedCount++;
 			return;

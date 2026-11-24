@@ -81,6 +81,7 @@ export function harness({ theme = plainTheme, trusted = false, cwd = process.cwd
 		entries,
 		notifications,
 		components,
+		component,
 		/** Session entries pi replays on session_start (e.g. /compact-transcript toggles). */
 		setBranch: (next: unknown[]) => {
 			branch = next;
