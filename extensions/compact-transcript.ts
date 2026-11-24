@@ -613,7 +613,6 @@ function beginTool(id: string, name: string, args: any) {
 	info.startedAt = Date.now();
 	state.runningToolIds.add(id);
 	ensureBlinkTimer();
-	recordToolStart(name, args);
 	joinBurst(info);
 	anchorCurrentThoughtTo(info);
 	// The component may already be on screen from argument streaming; repaint
@@ -820,7 +819,6 @@ function patchToolExecutionComponent() {
 		applyResult(info, this.result, this.result?.isError ?? false, this.isPartial);
 
 		if (!isEnabled() || this.expanded) {
-			setToolHidden(info, false);
 			this.__compactTranscriptForceSelf = false;
 			this.__compactTranscriptHidden = false;
 			return originalUpdateDisplay.call(this);
@@ -1342,16 +1340,24 @@ export default function compactTranscript(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_execution_start", (event, ctx) => {
+		recordToolStart(event.toolName, event.args);
+		// Pi doesn't create rows for nested calls. They still count toward the run summary.
+		if (event.parentToolCallId) return;
 		captureTheme(ctx);
 		beginTool(event.toolCallId, event.toolName, event.args);
 	});
 
 	pi.on("tool_execution_update", (event, ctx) => {
+		if (event.parentToolCallId) return;
 		captureTheme(ctx);
 		updateToolResult(event.toolCallId, event.partialResult, false, true);
 	});
 
 	pi.on("tool_execution_end", (event, ctx) => {
+		if (event.parentToolCallId) {
+			if (event.isError) state.runStats.failedCount++;
+			return;
+		}
 		captureTheme(ctx);
 		updateToolResult(event.toolCallId, event.result, event.isError, false);
 	});

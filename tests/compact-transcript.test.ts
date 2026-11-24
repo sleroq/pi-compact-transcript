@@ -371,17 +371,23 @@ test("with the extension off, clicks use pi's own handling", async () => {
 	}
 });
 
-test("global expand still switches compact rows to native output", async () => {
+test("global expand reveals every call and collapse restores the burst", async () => {
 	const { emit, tool, finish } = mouseHarness();
 	emit("agent_start");
 	try {
-		const tools = [tool("global-a", "bash", { command: "ls" }), tool("global-b", "read", { path: "file.txt" })];
+		const first = tool("global-a", "read", { path: "a.txt" });
+		const second = tool("global-b", "read", { path: "b.txt" });
+		const tools = [first, second, tool("global-c", "bash", { command: "ls" })];
 		for (const component of tools) finish(component);
-		// Ctrl+O expands every tool through setExpanded.
+		assert.deepEqual(first.render(80), []);
+		assert.match(stripTerminalSequences(second.render(80)[0]), /2× read b\.txt/);
+		const compactRows = tools.map((component) => component.render(80));
+
+		// Ctrl+O toggles every tool through setExpanded.
 		for (const component of tools) component.setExpanded(true);
 		for (const component of tools) assert.ok(component.render(80).length > 1);
 		for (const component of tools) component.setExpanded(false);
-		for (const component of tools) assert.equal(component.render(80).length, 1);
+		assert.deepEqual(tools.map((component) => component.render(80)), compactRows);
 	} finally {
 		await emit("session_shutdown");
 	}
