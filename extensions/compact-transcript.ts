@@ -773,7 +773,6 @@ function patchToolExecutionComponent() {
 		applyResult(info, this.result, this.result?.isError ?? false, this.isPartial);
 
 		if (!isEnabled() || this.expanded) {
-			setToolHidden(info, false);
 			this.__compactTranscriptForceSelf = false;
 			this.__compactTranscriptHidden = false;
 			return originalUpdateDisplay.call(this);
