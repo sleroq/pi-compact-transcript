@@ -1,24 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { AssistantMessageComponent, initTheme, ToolExecutionComponent, UserMessageComponent } from "@earendil-works/pi-coding-agent";
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import { AssistantMessageComponent, ToolExecutionComponent, UserMessageComponent } from "@earendil-works/pi-coding-agent";
 import { Container, stripTerminalSequences, Text, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
-import compactTranscript from "../extensions/compact-transcript.ts";
+import { harness } from "./helpers.ts";
 
 test("compact tool and thought rows use render width and recover on resize", async () => {
-	const handlers = new Map<string, Function>();
 	const theme = {
 		fg: (_color: string, text: string) => `\x1b[36m${text}\x1b[39m`,
 		bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
 	} as Theme;
-	const ctx = { ui: { theme, setStatus() {}, setWorkingMessage() {} } } as unknown as ExtensionContext;
-	compactTranscript({
-		on: (event: string, handler: Function) => handlers.set(event, handler),
-		registerCommand() {},
-		registerEntryRenderer() {},
-	} as unknown as ExtensionAPI);
-	const emit = (name: string, event = {}) => handlers.get(name)!(event, ctx);
-	emit("agent_start");
+	const { emit, startSession } = harness({ theme });
+	await startSession();
+	await emit("agent_start");
 	try {
 		const command = `echo ${"界🙂é ".repeat(35)}END_OF_COMMAND`;
 		const args = { command };
@@ -54,19 +48,13 @@ test("compact tool and thought rows use render width and recover on resize", asy
 });
 
 test("compact tool and thought rows reuse their truncated line until the width changes", async () => {
-	const handlers = new Map<string, Function>();
 	const theme = {
 		fg: (_color: string, text: string) => `\x1b[36m${text}\x1b[39m`,
 		bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
 	} as Theme;
-	const ctx = { ui: { theme, setStatus() {}, setWorkingMessage() {} } } as unknown as ExtensionContext;
-	compactTranscript({
-		on: (event: string, handler: Function) => handlers.set(event, handler),
-		registerCommand() {},
-		registerEntryRenderer() {},
-	} as unknown as ExtensionAPI);
-	const emit = (name: string, event = {}) => handlers.get(name)!(event, ctx);
-	emit("agent_start");
+	const { emit, startSession } = harness({ theme });
+	await startSession();
+	await emit("agent_start");
 	try {
 		const args = { command: `echo ${"界🙂é ".repeat(35)}END_OF_COMMAND` };
 		emit("tool_execution_start", { toolCallId: "cache-test", toolName: "bash", args });
@@ -92,17 +80,9 @@ test("compact tool and thought rows reuse their truncated line until the width c
 });
 
 test("commentary rail reuses its railed lines until the width changes", async () => {
-	initTheme("dark", false);
-	const handlers = new Map<string, Function>();
-	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as Theme;
-	const ctx = { ui: { theme, setStatus() {}, setWorkingMessage() {} } } as unknown as ExtensionContext;
-	compactTranscript({
-		on: (event: string, handler: Function) => handlers.set(event, handler),
-		registerCommand() {},
-		registerEntryRenderer() {},
-	} as unknown as ExtensionAPI);
-	const emit = (name: string, event = {}) => handlers.get(name)!(event, ctx);
-	emit("agent_start");
+	const { emit, startSession } = harness();
+	await startSession();
+	await emit("agent_start");
 	try {
 		const component = new AssistantMessageComponent({
 			role: "assistant",
@@ -128,20 +108,9 @@ test("commentary rail reuses its railed lines until the width changes", async ()
 });
 
 test("collapsing tool output clears image sources together with image components", async () => {
-	initTheme("dark", false);
-	const handlers = new Map<string, Function>();
-	const theme = {
-		fg: (_color: string, text: string) => text,
-		bold: (text: string) => text,
-	} as Theme;
-	const ctx = { ui: { theme, setStatus() {}, setWorkingMessage() {} } } as unknown as ExtensionContext;
-	compactTranscript({
-		on: (event: string, handler: Function) => handlers.set(event, handler),
-		registerCommand() {},
-		registerEntryRenderer() {},
-	} as unknown as ExtensionAPI);
-	const emit = (name: string, event = {}) => handlers.get(name)!(event, ctx);
-	emit("agent_start");
+	const { emit, startSession } = harness();
+	await startSession();
+	await emit("agent_start");
 	try {
 		const component = new ToolExecutionComponent("read", "image-test", { path: "image.png" }, {}, undefined,
 			{ requestRender() {} } as unknown as TUI, process.cwd());
@@ -163,62 +132,31 @@ test("collapsing tool output clears image sources together with image components
 });
 
 test("summaryStyle off hides activity summaries", async () => {
-	const handlers = new Map<string, Function>();
-	const renderers = new Map<string, Function>();
-	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as Theme;
-	let configEntries: unknown[] = [];
-	const ctx = {
-		ui: { theme, setStatus() {}, setWorkingMessage() {} },
-		cwd: process.cwd(),
-		isProjectTrusted: () => false,
-		sessionManager: { getBranch: () => configEntries },
-	} as unknown as ExtensionContext;
-	compactTranscript({
-		on: (event: string, handler: Function) => handlers.set(event, handler),
-		registerCommand() {},
-		registerEntryRenderer: (type: string, renderer: Function) => renderers.set(type, renderer),
-	} as unknown as ExtensionAPI);
-	const startWith = async (summaryStyle: string) => {
-		configEntries = [{ type: "custom", customType: "compact-transcript-config", data: { summaryStyle } }];
-		await handlers.get("session_start")!({ reason: "reload" }, ctx);
-	};
-	const render = renderers.get("compact-transcript-summary")!;
-	const entry = { data: { reads: 2, edits: 1, commands: 0, others: 0, failed: 0, durationMs: 4000 } };
+	const h = harness();
+	async function startWith(summaryStyle: string) {
+		h.setBranch([{ type: "custom", customType: "compact-transcript-config", data: { summaryStyle } }]);
+		await h.startSession();
+	}
+	const data = { reads: 2, edits: 1, commands: 0, others: 0, failed: 0, durationMs: 4000 };
 	try {
 		await startWith("off");
-		assert.equal(render(entry, {}, theme), undefined);
+		assert.equal(h.renderSummary(data), undefined);
 		await startWith("plain");
-		assert.ok(render(entry, {}, theme), "summaries render again when switched back on");
+		assert.ok(h.renderSummary(data), "summaries render again when switched back on");
 	} finally {
-		await handlers.get("session_shutdown")!({}, ctx);
+		await h.emit("session_shutdown");
 	}
 });
 
-function mouseHarness() {
-	initTheme("dark", false);
-	const handlers = new Map<string, Function>();
-	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as Theme;
-	let configEntries: unknown[] = [];
-	const ctx = {
-		ui: { theme, setStatus() {}, setWorkingMessage() {} },
-		cwd: process.cwd(),
-		isProjectTrusted: () => false,
-		sessionManager: { getBranch: () => configEntries },
-	} as unknown as ExtensionContext;
-	const pi = {
-		on: (event: string, handler: Function) => handlers.set(event, handler),
-		registerCommand() {},
-		registerEntryRenderer() {},
-	} as unknown as ExtensionAPI;
-	compactTranscript(pi);
-	const emit = (name: string, event = {}) => handlers.get(name)!(event, ctx);
+async function mouseHarness() {
+	const { emit, startSession, setBranch } = harness();
+	await startSession();
 	const tui = { requestRender() {} } as unknown as TUI;
 	return {
-		pi,
 		emit,
 		setEnabled: async (enabled: boolean) => {
-			configEntries = [{ type: "custom", customType: "compact-transcript-config", data: { enabled } }];
-			await emit("session_start", { reason: "reload" });
+			setBranch([{ type: "custom", customType: "compact-transcript-config", data: { enabled } }]);
+			await startSession();
 		},
 		tool: (id: string, toolName: string, args: object, definition?: object) => {
 			emit("tool_execution_start", { toolCallId: id, toolName, args });
@@ -236,7 +174,7 @@ function mouseHarness() {
 }
 
 test("clicking a compact tool row toggles only that tool", async () => {
-	const { emit, tool, finish, click, expanded } = mouseHarness();
+	const { emit, tool, finish, click, expanded } = await mouseHarness();
 	emit("agent_start");
 	try {
 		// Different tools, so the rows are not merged into one burst row.
@@ -269,7 +207,7 @@ test("clicking a compact tool row toggles only that tool", async () => {
 });
 
 test("hidden burst rows ignore clicks and the burst row expands", async () => {
-	const { emit, tool, finish, click, expanded } = mouseHarness();
+	const { emit, tool, finish, click, expanded } = await mouseHarness();
 	emit("agent_start");
 	try {
 		const first = tool("burst-a", "bash", { command: "ls" });
@@ -286,9 +224,9 @@ test("hidden burst rows ignore clicks and the burst row expands", async () => {
 	}
 });
 
-test("a compact tool block leaves one gap after a prompt and keeps its rows packed", () => {
-	const { emit, tool, finish, click } = mouseHarness();
-	emit("agent_start");
+test("a compact tool block leaves one gap after a prompt and keeps its rows packed", async () => {
+	const { emit, tool, finish, click } = await mouseHarness();
+	await emit("agent_start");
 	try {
 		const chat = new Container();
 		const prompt = new UserMessageComponent("Inspect the files.");
@@ -303,7 +241,7 @@ test("a compact tool block leaves one gap after a prompt and keeps its rows pack
 		assert.equal(click(burst, 0, { height: 2 }), undefined);
 		assert.deepEqual(click(burst, 1, { height: 2 }), { handled: true });
 	} finally {
-		emit("session_shutdown");
+		await emit("session_shutdown");
 	}
 });
 
@@ -319,7 +257,7 @@ const RENDER_SHELLS: Array<[string, object | undefined]> = [
 
 // Clicks a row of pi's native rendering that belongs to the tool call.
 function clickNativeRow(
-	harness: ReturnType<typeof mouseHarness>,
+	harness: Awaited<ReturnType<typeof mouseHarness>>,
 	component: ToolExecutionComponent,
 	label: string,
 ) {
@@ -330,7 +268,7 @@ function clickNativeRow(
 }
 
 test("expanded tools collapse through pi's own click handling", async () => {
-	const harness = mouseHarness();
+	const harness = await mouseHarness();
 	const { emit, tool, finish, click, expanded } = harness;
 	emit("agent_start");
 	try {
@@ -352,7 +290,7 @@ test("expanded tools collapse through pi's own click handling", async () => {
 });
 
 test("with the extension off, clicks use pi's own handling", async () => {
-	const harness = mouseHarness();
+	const harness = await mouseHarness();
 	const { emit, setEnabled, tool, finish, expanded } = harness;
 	await setEnabled(false);
 	emit("agent_start");
@@ -372,7 +310,7 @@ test("with the extension off, clicks use pi's own handling", async () => {
 });
 
 test("global expand reveals every call and collapse restores the burst", async () => {
-	const { emit, tool, finish } = mouseHarness();
+	const { emit, tool, finish } = await mouseHarness();
 	emit("agent_start");
 	try {
 		const first = tool("global-a", "read", { path: "a.txt" });
@@ -396,11 +334,11 @@ test("global expand reveals every call and collapse restores the burst", async (
 test("reloading the extension does not stack the mouse patch", async () => {
 	const proto = ToolExecutionComponent.prototype as any;
 	const patchRecord = () => proto[Symbol.for("pi-compact-transcript.tool-patch")];
-	const first = mouseHarness();
+	const first = await mouseHarness();
 	const native = patchRecord().originalHandleMouse;
 	assert.equal(typeof native, "function");
 	assert.notEqual(native.name, "patchedHandleMouse", "the stored handler is pi's own");
-	const { emit, tool, finish, click, expanded } = mouseHarness();
+	const { emit, tool, finish, click, expanded } = await mouseHarness();
 	assert.equal(patchRecord().originalHandleMouse, native, "reload keeps pi's original handler");
 	emit("agent_start");
 	try {

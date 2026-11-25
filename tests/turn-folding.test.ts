@@ -44,6 +44,45 @@ test("live turns group different tools and failures across commentary and retrie
 	} finally { await h.emit("session_shutdown"); }
 });
 
+test("a headless child cannot reset or add its calls to the live TUI fold", async () => {
+	const parent = harness();
+	parent.setBranch([config]);
+	await parent.startSession();
+	await parent.emit("message_start", { message: { role: "user" } });
+	await parent.emit("agent_start");
+	try {
+		const a = await parent.start("a", "read");
+		await parent.finish("a");
+
+		const child = harness({ mode: "print" });
+		child.setBranch([config]);
+		await child.startSession("startup");
+		await child.emit("message_start", { message: { role: "user" } });
+		await child.emit("agent_start");
+		const tool = { toolCallId: "child", toolName: "bash", args: {} };
+		await child.emit("tool_execution_start", tool);
+
+		const b = parent.component("b", "bash", {});
+		await parent.emit("tool_execution_start", { toolCallId: "b", toolName: "bash", args: {} });
+		await parent.finish("b");
+
+		await child.emit("tool_execution_end", { ...tool, result: failure, isError: true });
+		await child.emit("agent_end");
+		await child.emit("agent_settled");
+		await child.emit("session_shutdown");
+
+		const c = parent.component("c", "grep", {});
+		await parent.emit("tool_execution_start", { toolCallId: "c", toolName: "grep", args: {} });
+		await parent.finish("c");
+		await parent.emit("agent_end");
+		await parent.emit("agent_settled");
+
+		assert.deepEqual(lines(a), []);
+		assert.deepEqual(lines(b), []);
+		assert.deepEqual(lines(c), ["◆ 3 tool calls"]);
+	} finally { await parent.emit("session_shutdown"); }
+});
+
 test("history uses user and custom message boundaries, including on tree navigation", async () => {
 	const h = harness();
 	const branch = [config, message("u1", "user"), message("m1", "assistant", [call("a")]),

@@ -32,7 +32,9 @@ type ToolResult = {
  * Loads the extension against a fake pi and drives it the way pi does:
  * extension events plus the ToolExecutionComponent calls pi makes for each tool.
  */
-export function harness({ theme = plainTheme, trusted = false, cwd = process.cwd() } = {}) {
+export function harness({
+	theme = plainTheme, trusted = false, cwd = process.cwd(), mode = "tui",
+}: { theme?: Theme; trusted?: boolean; cwd?: string; mode?: ExtensionContext["mode"] } = {}) {
 	initTheme("dark", false);
 	const handlers = new Map<string, Function>();
 	const commands = new Map<string, any>();
@@ -52,7 +54,7 @@ export function harness({ theme = plainTheme, trusted = false, cwd = process.cwd
 			confirm: async () => false,
 		},
 		cwd,
-		mode: "tui",
+		mode,
 		isProjectTrusted: () => trusted,
 		sessionManager: { getBranch: () => branch },
 	} as unknown as ExtensionContext;

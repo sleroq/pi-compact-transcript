@@ -218,7 +218,7 @@ function getState(): RuntimeState {
 	return runtimeState;
 }
 
-const state = getState();
+let state: RuntimeState;
 
 function isEnabled(): boolean {
 	return state.config.enabled;
@@ -1369,8 +1369,8 @@ function trackFoldActivity(pi: ExtensionAPI) {
 	let pendingReasoning: string | undefined;
 
 	return {
-		noteReasoning(message: MessageEndEvent["message"], ctx: ExtensionContext) {
-			if (state.config.toolGrouping !== "turn" || !state.config.activitySummary || !isEnabled() || ctx.mode !== "tui") return;
+		noteReasoning(message: MessageEndEvent["message"]) {
+			if (state.config.toolGrouping !== "turn" || !state.config.activitySummary || !isEnabled()) return;
 			const excerpt = toolReasoning(message);
 			if (!excerpt) return;
 
@@ -1382,7 +1382,7 @@ function trackFoldActivity(pi: ExtensionAPI) {
 		forCurrentFold(ctx: ExtensionContext) {
 			const fold = state.currentFold;
 			const model = state.config.activitySummary;
-			if (!fold || !model || !isEnabled() || ctx.mode !== "tui") return;
+			if (!fold || !model || !isEnabled()) return;
 			const existing = activities.get(fold);
 			if (existing) return existing;
 			const summarize = activitySummarizer(ctx.modelRegistry, model);
@@ -1416,9 +1416,7 @@ function trackFoldActivity(pi: ExtensionAPI) {
 	};
 }
 
-export default function compactTranscript(pi: ExtensionAPI) {
-	const activity = trackFoldActivity(pi);
-	patchRenderers();
+function registerTuiHandlers(pi: ExtensionAPI, activity: ReturnType<typeof trackFoldActivity>) {
 	registerCommand(pi);
 
 	pi.registerEntryRenderer<SummaryData>(SUMMARY_ENTRY_TYPE, (entry, _options, theme) => {
@@ -1430,28 +1428,6 @@ export default function compactTranscript(pi: ExtensionAPI) {
 			return new Markdown(`> ${line}`, 0, 0, getMarkdownTheme());
 		}
 		return new Text(theme.fg("muted", line), 0, 0);
-	});
-
-	pi.on("session_start", async (event, ctx) => {
-		activity.cancelAll();
-		state.agentActive = false;
-		restoreConfigFromBranch(ctx);
-		captureTheme(ctx);
-		// Drop all per-tool state and component registries from the previous
-		// session; stale burst counts otherwise corrupt the rebuilt transcript
-		// after resume or /reload.
-		resetToolRun();
-		if (state.config.toolGrouping === "turn") indexHistory(ctx);
-		state.runStats = newRunStats();
-		state.toolComponents = new Set();
-		state.assistantComponents = new Set();
-		ctx.ui.setWorkingMessage();
-		// Clear any footer status left behind by pre-0.4 versions of this extension.
-		ctx.ui.setStatus(STATUS_KEY, undefined);
-
-		if (event.reason === "startup") {
-			checkAndNotifyRecommendedSettings(ctx);
-		}
 	});
 
 	pi.on("session_tree", (_event, ctx) => {
@@ -1468,8 +1444,8 @@ export default function compactTranscript(pi: ExtensionAPI) {
 		if (event.message.role === "user" || event.message.role === "custom") activity.finishCurrentFold();
 	});
 
-	pi.on("message_end", (event, ctx) => {
-		activity.noteReasoning(event.message, ctx);
+	pi.on("message_end", (event) => {
+		activity.noteReasoning(event.message);
 	});
 
 	pi.on("agent_settled", () => {
@@ -1550,5 +1526,40 @@ export default function compactTranscript(pi: ExtensionAPI) {
 		}
 		captureTheme(ctx);
 		updateToolResult(event.toolCallId, event.result, event.isError, false);
+	});
+}
+
+export default function compactTranscript(pi: ExtensionAPI) {
+	let activity: ReturnType<typeof trackFoldActivity> | undefined;
+	pi.on("session_start", (event, ctx) => {
+		// In-process subagents load the extension too, but must not touch the
+		// process-wide TUI renderers or the active transcript state.
+		if (ctx.mode !== "tui") return;
+		if (!activity) {
+			state = getState();
+			activity = trackFoldActivity(pi);
+			patchRenderers();
+			registerTuiHandlers(pi, activity);
+		}
+
+		activity.cancelAll();
+		state.agentActive = false;
+		restoreConfigFromBranch(ctx);
+		captureTheme(ctx);
+		// Drop all per-tool state and component registries from the previous
+		// session; stale burst counts otherwise corrupt the rebuilt transcript
+		// after resume or /reload.
+		resetToolRun();
+		if (state.config.toolGrouping === "turn") indexHistory(ctx);
+		state.runStats = newRunStats();
+		state.toolComponents = new Set();
+		state.assistantComponents = new Set();
+		ctx.ui.setWorkingMessage();
+		// Clear any footer status left behind by pre-0.4 versions of this extension.
+		ctx.ui.setStatus(STATUS_KEY, undefined);
+
+		if (event.reason === "startup") {
+			checkAndNotifyRecommendedSettings(ctx);
+		}
 	});
 }
